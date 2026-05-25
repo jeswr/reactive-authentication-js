@@ -15,15 +15,20 @@
     "url": "git+https://github.com/langsamu/reactive-authentication-js.git"
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "license": "MIT",
   "dependencies": {
+    "@jeswr/solid-webauthn-protocol": "file:../protocol",
+    "@simplewebauthn/browser": "^13",
     "oauth4webapi": "^3",
     "dpop": "^2"
   },
   "devDependencies": {
-    "typescript": "^6"
+    "typescript": "^6",
+    "vitest": "^3"
   },
   "engines": {
     "node": ">=24.0.0"
