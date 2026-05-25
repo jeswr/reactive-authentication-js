@@ -1,6 +1,7 @@
 export * from "./AuthorizationCodeFlowUI.js"
 export * from "./BearerTokenProvider.js"
 export * from "./DPoPTokenProvider.js"
+export * from "./WebAuthnTokenProvider.js"
 export * from "./ReactiveFetchManager.js"
 export * from "./ReactiveFetchWorkerManager.js"
 export * from "./CodeRequestCancelledError.js"
