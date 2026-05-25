@@ -23,8 +23,7 @@
   "dependencies": {
     "@jeswr/solid-webauthn-protocol": "file:../protocol",
     "@simplewebauthn/browser": "^13",
-    "oauth4webapi": "^3",
-    "dpop": "^2"
+    "oauth4webapi": "^3"
   },
   "devDependencies": {
     "typescript": "^6",

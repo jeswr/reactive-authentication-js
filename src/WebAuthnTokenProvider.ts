@@ -3,7 +3,6 @@
 // Copyright (c) 2026 Jesse Wright
 
 import * as oauth from "oauth4webapi"
-import * as DPoP from "dpop"
 import { startAuthentication } from "@simplewebauthn/browser"
 import {
     TOKEN_EXCHANGE_GRANT_TYPE,
@@ -15,6 +14,7 @@ import type {
     AssertionOptions,
     AssertionBundle,
 } from "@jeswr/solid-webauthn-protocol"
+import { dpopBoundRequest } from "./dpopBoundRequest.js"
 import type { TokenProvider } from "./TokenProvider.js"
 
 /**
@@ -75,13 +75,16 @@ export type WebAuthnConfig = Record<string, WebAuthnIssuerConfig>
 const DEFAULT_OPTIONS_PATH = "/.oidc/webauthn/assertion-options"
 const DEFAULT_TOKEN_PATH = "/.oidc/token"
 
+/** No-op client authentication for a public client with no `client_id`. */
+const noClientAuth: oauth.ClientAuth = () => {}
+
 /**
  * A {@link TokenProvider} that performs redirect-free Solid-OIDC re-authentication
  * with a WebAuthn (passkey) assertion (`spec/ARCHITECTURE.md` §6.2).
  *
  * On a 401, the orchestrator calls {@link upgrade}, which:
  * 1. resolves the OP for the target request;
- * 2. `GET`s the OP assertion-options endpoint for a single-use challenge;
+ * 2. `POST`s the OP assertion-options endpoint for a single-use challenge;
  * 3. runs the WebAuthn `get()` ceremony (`navigator.credentials.get`, via
  *    SimpleWebAuthn's `startAuthentication`) — the app is the Relying Party, so
  *    the assertion's `clientDataJSON.origin` unspoofably attests the app;
@@ -89,6 +92,9 @@ const DEFAULT_TOKEN_PATH = "/.oidc/token"
  * 5. exchanges it at the token endpoint (RFC 8693) with a DPoP proof; and
  * 6. returns the request upgraded with `Authorization: DPoP <token>` + a
  *    resource-bound `DPoP` proof.
+ *
+ * DPoP (proof generation, nonce tracking, `htu` computation) and the RFC 8693
+ * exchange are delegated to `oauth4webapi` built-ins — no hand-rolled proofs.
  *
  * No orchestrator edits are required, so this module lifts cleanly into
  * `@jeswr/solid-reactive-fetch`.
@@ -139,77 +145,97 @@ export class WebAuthnTokenProvider implements TokenProvider {
         const bundle: AssertionBundle = { version: BUNDLE_VERSION, credential }
         const subjectToken = encodeAssertionBundle(bundle)
 
-        // (e) DPoP-bound RFC 8693 token exchange at the token endpoint.
+        // (e) DPoP-bound RFC 8693 token exchange. The `oauth4webapi` DPoP handle
+        // attaches proofs and tracks server-issued nonces; `isDPoPNonceError`
+        // drives the single retry (RFC 9449 §8).
         const dpopKey = await oauth.generateKeyPair("ES256", { extractable: false })
-
-        const body = new URLSearchParams()
-        body.set("grant_type", TOKEN_EXCHANGE_GRANT_TYPE)
-        body.set("subject_token", subjectToken)
-        body.set("subject_token_type", WEBAUTHN_ASSERTION_TOKEN_TYPE)
-        // The app is a public client (`token_endpoint_auth_method: none`); the
-        // OP authenticates it solely by dereferencing this Client ID Document URI
-        // (Solid-OIDC). Without it a Solid OP rejects the request with
-        // `invalid_request - no client authentication mechanism provided`.
-        const clientId = this.#clientId(issuerConfig)
-        if (clientId !== undefined) {
-            body.set("client_id", clientId.href)
-        }
-
-        const tokenResult = await this.#exchange(tokenEndpoint, body, dpopKey, request.signal)
-
-        // (f) Return the request upgraded with a resource-bound DPoP proof.
-        const headers = new Headers(request.headers)
-        headers.set(
-            "DPoP",
-            await DPoP.generateProof(dpopKey, htu(request.url), request.method, undefined, tokenResult.access_token),
+        const dpop = oauth.DPoP({}, dpopKey)
+        const accessToken = await this.#exchange(
+            issuer,
+            tokenEndpoint,
+            issuerConfig,
+            subjectToken,
+            dpop,
+            request.signal,
         )
-        headers.set("Authorization", ["DPoP", tokenResult.access_token].join(" "))
 
-        return new Request(request, { headers })
+        // (f) Return the request upgraded with a resource-bound DPoP proof
+        // (the same DPoP handle computes `htu` and `ath`).
+        return dpopBoundRequest(request, accessToken, dpop)
     }
 
     /**
-     * POST the token exchange with a DPoP proof, retrying once on a
-     * `use_dpop_nonce` challenge (RFC 9449 §8) as the OP may require a nonce.
+     * RFC 8693 token exchange at the token endpoint with a DPoP proof, retrying
+     * once on a `use_dpop_nonce` challenge (RFC 9449 §8). The DPoP handle has
+     * already cached the server nonce by the time {@link oauth.isDPoPNonceError}
+     * reports the need to retry.
      */
     async #exchange(
+        issuer: URL,
         tokenEndpoint: URL,
-        body: URLSearchParams,
-        dpopKey: CryptoKeyPair,
+        config: WebAuthnIssuerConfig,
+        subjectToken: string,
+        dpop: oauth.DPoPHandle,
         signal: AbortSignal,
-        nonce?: string,
-    ): Promise<{ access_token: string }> {
-        const headers = new Headers({
-            accept: "application/json",
-            "content-type": "application/x-www-form-urlencoded",
-        })
-        headers.set(
-            "DPoP",
-            await DPoP.generateProof(dpopKey, htu(tokenEndpoint.href), "POST", nonce),
-        )
+    ): Promise<string> {
+        const as: oauth.AuthorizationServer = {
+            issuer: issuer.href,
+            token_endpoint: tokenEndpoint.href,
+        }
+        // The app is a public client (`token_endpoint_auth_method: none`); the
+        // OP authenticates it solely by dereferencing this Client ID Document URI
+        // (Solid-OIDC). `None()` sends it as the `client_id` body parameter;
+        // without it a Solid OP rejects with `invalid_request - no client
+        // authentication mechanism provided`. With no `client_id` (non-browser,
+        // unconfigured) the OP must accept an unauthenticated public client.
+        const clientId = this.#clientId(config)
+        // `assertClient` requires a non-empty `client_id`; with no real client
+        // (non-browser, unconfigured) we satisfy it with a placeholder and a
+        // no-op auth so nothing is sent. `None()` sends the real `client_id`.
+        const client: oauth.Client = { client_id: clientId?.href ?? as.issuer }
+        const clientAuth = clientId !== undefined ? oauth.None() : noClientAuth
 
-        const response = await fetch(tokenEndpoint, {
-            method: "POST",
-            headers,
-            body,
-            signal,
-        })
+        const parameters = new URLSearchParams()
+        parameters.set("subject_token", subjectToken)
+        parameters.set("subject_token_type", WEBAUTHN_ASSERTION_TOKEN_TYPE)
 
-        if (!response.ok) {
-            const dpopNonce = response.headers.get("DPoP-Nonce")
-            if (nonce === undefined && dpopNonce !== null && (await isDpopNonceError(response))) {
-                return this.#exchange(tokenEndpoint, body, dpopKey, signal, dpopNonce)
+        const exchangeOnce = () =>
+            oauth.genericTokenEndpointRequest(
+                as,
+                client,
+                clientAuth,
+                TOKEN_EXCHANGE_GRANT_TYPE,
+                parameters,
+                { DPoP: dpop, signal },
+            )
+
+        let response = await exchangeOnce()
+        try {
+            return await this.#processTokenResponse(as, client, response)
+        } catch (error) {
+            if (!oauth.isDPoPNonceError(error)) {
+                throw error
             }
+            response = await exchangeOnce()
+            return this.#processTokenResponse(as, client, response)
+        }
+    }
+
+    async #processTokenResponse(
+        as: oauth.AuthorizationServer,
+        client: oauth.Client,
+        response: Response,
+    ): Promise<string> {
+        const result = await oauth.processGenericTokenEndpointResponse(as, client, response)
+        // This flow always sender-constrains with DPoP; a Bearer token would be
+        // bound with a (malformed) `Authorization: DPoP` header downstream, so
+        // reject it here. `token_type` is normalised to lowercase by oauth4webapi.
+        if (result.token_type !== "dpop") {
             throw new Error(
-                `Token exchange failed: ${response.status} ${response.statusText}`,
+                `Token exchange returned a non-DPoP token (token_type: ${result.token_type})`,
             )
         }
-
-        const result = (await response.json()) as { access_token?: string; token_type?: string }
-        if (typeof result.access_token !== "string") {
-            throw new Error("Token exchange response missing access_token")
-        }
-        return { access_token: result.access_token }
+        return result.access_token
     }
 
     async #resolveTokenEndpoint(issuer: URL, config: WebAuthnIssuerConfig): Promise<URL> {
@@ -255,27 +281,5 @@ export class WebAuthnTokenProvider implements TokenProvider {
     #configFor(request: Request): WebAuthnIssuerConfig | undefined {
         const host = new URL(request.url).host
         return this.#config[host]
-    }
-}
-
-/**
- * The DPoP `htu` claim: the request URI **without** query or fragment
- * (RFC 9449 §4.2). `dpop` does not strip these, so normalise here.
- */
-function htu(url: string): string {
-    const u = new URL(url)
-    u.search = ""
-    u.hash = ""
-    return u.href
-}
-
-/** Whether an error response is an RFC 9449 `use_dpop_nonce` challenge. */
-async function isDpopNonceError(response: Response): Promise<boolean> {
-    try {
-        const clone = response.clone()
-        const body = (await clone.json()) as { error?: string }
-        return body.error === "use_dpop_nonce"
-    } catch {
-        return false
     }
 }

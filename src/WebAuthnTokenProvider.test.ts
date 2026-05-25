@@ -272,6 +272,27 @@ describe("WebAuthnTokenProvider", () => {
             expect(credentialsGet).not.toHaveBeenCalled()
         })
 
+        it("rejects a non-DPoP token from the exchange", async () => {
+            vi.stubGlobal(
+                "fetch",
+                vi.fn(async (input: string | URL | Request) => {
+                    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+                    if (url.includes("assertion-options")) {
+                        return new Response(JSON.stringify(ASSERTION_OPTIONS), { status: 200 })
+                    }
+                    // OP returns a Bearer token, which this DPoP-only flow must refuse.
+                    return new Response(
+                        JSON.stringify({ access_token: ACCESS_TOKEN, token_type: "Bearer" }),
+                        { status: 200, headers: { "content-type": "application/json" } },
+                    )
+                }),
+            )
+            const provider = new WebAuthnTokenProvider(config)
+            await expect(provider.upgrade(new Request(`${POD}/resource`))).rejects.toThrow(
+                /non-DPoP token/,
+            )
+        })
+
         it("retries the token exchange once on a use_dpop_nonce challenge", async () => {
             let tokenCalls = 0
             const nonces: (string | null)[] = []
@@ -286,14 +307,21 @@ describe("WebAuthnTokenProvider", () => {
                     nonces.push(new Headers(init?.headers).get("DPoP"))
                     tokenCalls += 1
                     if (tokenCalls === 1) {
+                        // RFC 9449 §8 nonce challenge. The JSON content-type is
+                        // required for oauth4webapi to surface the error body as
+                        // a ResponseBodyError (so isDPoPNonceError can detect it).
                         return new Response(JSON.stringify({ error: "use_dpop_nonce" }), {
                             status: 400,
-                            headers: { "DPoP-Nonce": "server-nonce" },
+                            headers: {
+                                "content-type": "application/json",
+                                "DPoP-Nonce": "server-nonce",
+                            },
                         })
                     }
-                    return new Response(JSON.stringify({ access_token: ACCESS_TOKEN, token_type: "DPoP" }), {
-                        status: 200,
-                    })
+                    return new Response(
+                        JSON.stringify({ access_token: ACCESS_TOKEN, token_type: "DPoP" }),
+                        { status: 200, headers: { "content-type": "application/json" } },
+                    )
                 }),
             )
 

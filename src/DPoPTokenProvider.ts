@@ -1,5 +1,5 @@
 import * as oauth from "oauth4webapi"
-import * as DPoP from "dpop"
+import { dpopBoundRequest } from "./dpopBoundRequest.js"
 import type { GetCodeCallback } from "./GetCodeCallback.js"
 import type { TokenProvider } from "./TokenProvider.js"
 
@@ -104,12 +104,7 @@ export class DPoPTokenProvider implements TokenProvider {
 
         const tokenResult = await oauth.processAuthorizationCodeResponse(authorizationServer, clientRegistration, tokenResponse, {expectedNonce: this.nonceVerificationOverride(authorizationServer.issuer, nonce)})
 
-        const headers = new Headers(request.headers)
-
-        headers.set("DPoP", await DPoP.generateProof(dpopKey, request.url, request.method, undefined, tokenResult.access_token))
-        headers.set("Authorization", ["DPoP", tokenResult.access_token].join(" "))
-
-        return new Request(request, {headers})
+        return dpopBoundRequest(request, tokenResult.access_token, dpop)
     }
 
     private getClientAuth(issuer: string, client: oauth.OmitSymbolProperties<oauth.Client>): oauth.ClientAuth {
