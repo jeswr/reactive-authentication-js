@@ -49,6 +49,19 @@ export interface WebAuthnIssuerConfig {
      * `<issuer>/.oidc/token`.
      */
     tokenEndpoint?: string | URL
+
+    /**
+     * The application's Solid-OIDC **Client ID Document URI** — the public
+     * `client_id` the OP authenticates at the token endpoint (the app is a
+     * public client, `token_endpoint_auth_method: none`). It is sent in the
+     * RFC 8693 token-exchange body so the OP can (a) dereference the document to
+     * resolve the app's allowed origins (`spec/ARCHITECTURE.md` §8.2) and
+     * (b) bind the issued token's `client_id`/`azp` claim. Defaults to the app's
+     * own origin (`<page-origin>/`) when omitted, but a Solid-OIDC client SHOULD
+     * set its Client ID Document URI so the credential's ⟨WebID, ClientID⟩ binding
+     * is the dereferenceable document, not a bare origin.
+     */
+    clientId?: string | URL
 }
 
 /**
@@ -133,6 +146,14 @@ export class WebAuthnTokenProvider implements TokenProvider {
         body.set("grant_type", TOKEN_EXCHANGE_GRANT_TYPE)
         body.set("subject_token", subjectToken)
         body.set("subject_token_type", WEBAUTHN_ASSERTION_TOKEN_TYPE)
+        // The app is a public client (`token_endpoint_auth_method: none`); the
+        // OP authenticates it solely by dereferencing this Client ID Document URI
+        // (Solid-OIDC). Without it a Solid OP rejects the request with
+        // `invalid_request - no client authentication mechanism provided`.
+        const clientId = this.#clientId(issuerConfig)
+        if (clientId !== undefined) {
+            body.set("client_id", clientId.href)
+        }
 
         const tokenResult = await this.#exchange(tokenEndpoint, body, dpopKey, request.signal)
 
@@ -211,6 +232,23 @@ export class WebAuthnTokenProvider implements TokenProvider {
         return config.assertionOptionsEndpoint !== undefined
             ? new URL(config.assertionOptionsEndpoint)
             : new URL(DEFAULT_OPTIONS_PATH, issuer)
+    }
+
+    /**
+     * The `client_id` to authenticate as: the configured Client ID Document URI,
+     * else the app's own origin root (a valid bare-origin Solid-OIDC client_id)
+     * when running in a browser. Returns `undefined` only outside a browser with
+     * no configured `clientId` — in which case the OP must accept an
+     * unauthenticated public client, or the caller should configure `clientId`.
+     */
+    #clientId(config: WebAuthnIssuerConfig): URL | undefined {
+        if (config.clientId !== undefined) {
+            return new URL(config.clientId)
+        }
+        if (typeof location !== "undefined" && location.origin && location.origin !== "null") {
+            return new URL("/", location.origin)
+        }
+        return undefined
     }
 
     /** First config whose host is the substring/host match for the request. */

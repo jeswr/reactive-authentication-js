@@ -14,6 +14,7 @@ import { WebAuthnTokenProvider } from "./WebAuthnTokenProvider.js"
 const OP = "https://op.example"
 const POD = "https://pod.example"
 const POD_HOST = "pod.example"
+const CLIENT_ID = "https://app.example/clientid.jsonld"
 
 const ASSERTION_OPTIONS = {
     challenge: "Y2hhbGxlbmdl", // base64url "challenge"
@@ -210,6 +211,20 @@ describe("WebAuthnTokenProvider", () => {
             await provider.upgrade(new Request(`${POD}/resource`))
 
             expect(calls.some((u) => u === `${OP}/.oidc/token`)).toBe(true)
+        })
+
+        it("sends the configured Client ID Document URI as client_id", async () => {
+            const { calls } = mockFetch()
+            const provider = new WebAuthnTokenProvider({
+                [POD_HOST]: { ...config[POD_HOST]!, clientId: CLIENT_ID },
+            })
+
+            await provider.upgrade(new Request(`${POD}/resource`))
+
+            const body = calls[1]!.init?.body as URLSearchParams
+            // A Solid public client authenticates by its dereferenceable
+            // Client ID Document URI (token_endpoint_auth_method: none).
+            expect(body.get("client_id")).toBe(CLIENT_ID)
         })
 
         it("can be configured to GET the assertion options", async () => {
