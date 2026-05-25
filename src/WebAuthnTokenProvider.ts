@@ -36,6 +36,14 @@ export interface WebAuthnIssuerConfig {
     assertionOptionsEndpoint?: string | URL
 
     /**
+     * HTTP method for the assertion-options request. Issuing a single-use
+     * challenge is a state-changing, non-cacheable operation, so this defaults
+     * to `POST` (`spec/ARCHITECTURE.md` §6.2, §8.3). Set to `"GET"` for OPs that
+     * expose the challenge as a safe read.
+     */
+    assertionOptionsMethod?: "GET" | "POST"
+
+    /**
      * The token endpoint for the RFC 8693 token exchange. Defaults to the
      * issuer's OIDC-discovered `token_endpoint`, falling back to
      * `<issuer>/.oidc/token`.
@@ -97,9 +105,10 @@ export class WebAuthnTokenProvider implements TokenProvider {
         const tokenEndpoint = await this.#resolveTokenEndpoint(issuer, issuerConfig)
         const optionsEndpoint = this.#resolveOptionsEndpoint(issuer, issuerConfig)
 
-        // (b) Fetch a single-use challenge.
+        // (b) Fetch a single-use challenge (POST by default — issuing the
+        // challenge is state-changing, `spec/ARCHITECTURE.md` §6.2/§8.3).
         const optionsResponse = await fetch(optionsEndpoint, {
-            method: "GET",
+            method: issuerConfig.assertionOptionsMethod ?? "POST",
             headers: { accept: "application/json" },
             signal: request.signal,
         })
@@ -131,7 +140,7 @@ export class WebAuthnTokenProvider implements TokenProvider {
         const headers = new Headers(request.headers)
         headers.set(
             "DPoP",
-            await DPoP.generateProof(dpopKey, request.url, request.method, undefined, tokenResult.access_token),
+            await DPoP.generateProof(dpopKey, htu(request.url), request.method, undefined, tokenResult.access_token),
         )
         headers.set("Authorization", ["DPoP", tokenResult.access_token].join(" "))
 
@@ -155,7 +164,7 @@ export class WebAuthnTokenProvider implements TokenProvider {
         })
         headers.set(
             "DPoP",
-            await DPoP.generateProof(dpopKey, tokenEndpoint.href, "POST", nonce),
+            await DPoP.generateProof(dpopKey, htu(tokenEndpoint.href), "POST", nonce),
         )
 
         const response = await fetch(tokenEndpoint, {
@@ -209,6 +218,17 @@ export class WebAuthnTokenProvider implements TokenProvider {
         const host = new URL(request.url).host
         return this.#config[host]
     }
+}
+
+/**
+ * The DPoP `htu` claim: the request URI **without** query or fragment
+ * (RFC 9449 §4.2). `dpop` does not strip these, so normalise here.
+ */
+function htu(url: string): string {
+    const u = new URL(url)
+    u.search = ""
+    u.hash = ""
+    return u.href
 }
 
 /** Whether an error response is an RFC 9449 `use_dpop_nonce` challenge. */

@@ -43,6 +43,13 @@ function fakeCredential() {
     }
 }
 
+/** Decode the `htu` claim from a DPoP proof JWT (header.payload.sig). */
+function dpopHtu(proof: string): string {
+    const payload = proof.split(".")[1]!
+    const json = Buffer.from(payload, "base64url").toString("utf8")
+    return (JSON.parse(json) as { htu: string }).htu
+}
+
 let credentialsGet: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
@@ -114,9 +121,9 @@ describe("WebAuthnTokenProvider", () => {
 
             const upgraded = await provider.upgrade(new Request(`${POD}/resource`))
 
-            // (b) options fetched first, by GET.
+            // (b) options fetched first, by POST (state-changing challenge issuance).
             expect(calls[0]!.url).toContain("assertion-options")
-            expect((calls[0]!.init?.method ?? "GET")).toBe("GET")
+            expect(calls[0]!.init?.method).toBe("POST")
 
             // (c) the WebAuthn ceremony ran with the challenge from options.
             expect(credentialsGet).toHaveBeenCalledOnce()
@@ -203,6 +210,31 @@ describe("WebAuthnTokenProvider", () => {
             await provider.upgrade(new Request(`${POD}/resource`))
 
             expect(calls.some((u) => u === `${OP}/.oidc/token`)).toBe(true)
+        })
+
+        it("can be configured to GET the assertion options", async () => {
+            const { calls } = mockFetch()
+            const provider = new WebAuthnTokenProvider({
+                [POD_HOST]: { ...config[POD_HOST]!, assertionOptionsMethod: "GET" },
+            })
+
+            await provider.upgrade(new Request(`${POD}/resource`))
+
+            expect(calls[0]!.url).toContain("assertion-options")
+            expect(calls[0]!.init?.method).toBe("GET")
+        })
+
+        it("omits query and fragment from the DPoP htu (RFC 9449 §4.2)", async () => {
+            const { calls } = mockFetch()
+            const provider = new WebAuthnTokenProvider(config)
+
+            const upgraded = await provider.upgrade(new Request(`${POD}/resource?a=1#frag`))
+
+            // resource-bound proof
+            expect(dpopHtu(upgraded.headers.get("DPoP")!)).toBe(`${POD}/resource`)
+            // token-endpoint proof
+            const tokenHeaders = new Headers(calls[1]!.init?.headers)
+            expect(dpopHtu(tokenHeaders.get("DPoP")!)).toBe(`${OP}/.oidc/token`)
         })
 
         it("throws when no configuration matches", async () => {
