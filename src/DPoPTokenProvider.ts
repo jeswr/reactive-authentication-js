@@ -122,6 +122,7 @@ export class DPoPTokenProvider implements TokenProvider {
                 e instanceof oauth.AuthorizationResponseError && (e.error === "interaction_required" || e.error === "consent_required" || e.error === "login_required") ||
 
                 // Workaround ESS not returning `iss` in error response
+                // TODO: Eliminate once bug fixed
                 isEssMissingIssInteractionNeeded(e)
             ) {
                 console.debug("Authorization server requires user interaction, retrying without prompt")
@@ -195,6 +196,11 @@ export class DPoPTokenProvider implements TokenProvider {
     }
 }
 
+/**
+ * @see Bug report at https://inrupt.atlassian.net/servicedesk/customer/portal/4/FEEDBACK-445
+ * @see Bug repro at https://gist.github.com/langsamu/ac55045a6ddc5893000b722429146b3a#file-iss_missing_error_callback-html
+ * @see Spec https://www.rfc-editor.org/rfc/rfc9207.html#name-response-parameter-iss
+ */
 function isEssMissingIssInteractionNeeded(e: unknown) {
     try {
         return ((((e as oauth.OperationProcessingError).cause as any).parameters) as URLSearchParams).get("error") === "interaction_required"
