@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Browser cache smoke test</title>
+<body>
+<pre id="result">Running…</pre>
+<script type="importmap">
+{"imports": {
+  "@key-value-kit/core": "../node_modules/@key-value-kit/core/dist/index.js",
+  "@key-value-kit/storage/memory": "../node_modules/@key-value-kit/storage/dist/memory.js",
+  "@key-value-kit/storage/indexeddb": "../node_modules/@key-value-kit/storage/dist/indexeddb.js",
+  "@key-value-kit/storage/web-storage": "../node_modules/@key-value-kit/storage/dist/web-storage.js",
+  "idb-keyval": "../node_modules/idb-keyval/dist/index.js"
+}}
+</script>
+<script type="module">
+import { createIndexedDbStore } from "@key-value-kit/storage/indexeddb"
+import { createWebStorageStore } from "@key-value-kit/storage/web-storage"
+import { withCodec } from "@key-value-kit/core"
+import { createBrowserCaches } from "../dist/createBrowserCaches.js"
+
+const result = document.querySelector("#result")
+const assert = (condition, message) => { if (!condition) throw new Error(message) }
+// A unique test namespace avoids application data and permits independent tabs.
+const query = new URLSearchParams(location.search)
+const namespace = query.get("namespace") ?? `smoke-${crypto.randomUUID()}`
+const cache = createIndexedDbStore({ namespace })
+const codec = { encode: JSON.stringify, decode: JSON.parse }
+const local = withCodec(createWebStorageStore(localStorage, { namespace }), codec)
+const session = withCodec(createWebStorageStore(sessionStorage, { namespace }), codec)
+const preset = createBrowserCaches(namespace)
+
+try {
+    if (!query.has("namespace")) {
+        const keys = await crypto.subtle.generateKey({name: "ECDSA", namedCurve: "P-256"}, false, ["sign", "verify"])
+        await cache.setItem("keys", keys)
+        await local.setItem("issuer", "https://idp.example/")
+        await session.setItem("issuer", "https://idp.example/")
+        await preset.issuer.setItem("resource", "https://idp.example/")
+        await preset.token.setItem("resource", {secret: "must stay in memory"})
+        location.replace(`?namespace=${encodeURIComponent(namespace)}`)
+    } else {
+        const keys = await cache.getItem("keys")
+        assert(keys.privateKey.extractable === false, "non-extractability lost across reload")
+        const data = new TextEncoder().encode("proof")
+        const algorithm = {name: "ECDSA", hash: "SHA-256"}
+        const signature = await crypto.subtle.sign(algorithm, keys.privateKey, data)
+        assert(await crypto.subtle.verify(algorithm, keys.publicKey, signature, data), "restored key cannot sign")
+        assert(await local.getItem("issuer") === "https://idp.example/", "localStorage not restored")
+        assert(await session.getItem("issuer") === "https://idp.example/", "sessionStorage not restored")
+        assert(await preset.issuer.getItem("resource") === "https://idp.example/", "preset metadata not restored")
+        assert(await preset.token.getItem("resource") === null, "preset persisted credentials")
+        const other = createIndexedDbStore({ namespace: `${namespace}-other` })
+        await other.setItem("keep", true)
+        await cache.clear()
+        assert(await other.getItem("keep") === true, "clear crossed namespaces")
+        await other.clear()
+        await local.clear()
+        await session.clear()
+        await preset.issuer.clear()
+        result.textContent = "PASS: reload persistence, non-extractable key signing, Web Storage, browser preset, namespace isolation"
+    }
+} catch (error) {
+    result.textContent = `FAIL: ${error.stack}`
+}
+</script>
+</body>
+</html>
