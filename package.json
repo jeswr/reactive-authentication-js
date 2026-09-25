@@ -26,18 +26,22 @@
     "url": "git+https://github.com/solid-contrib/reactive-authentication.git"
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "npm run build && node --test test/*.test.js"
   },
   "license": "MIT",
   "dependencies": {
-    "oauth4webapi": "^3",
-    "dpop": "^2",
+    "@key-value-kit/core": "0.1.0-alpha.0",
+    "@key-value-kit/storage": "0.1.0-alpha.0",
     "@rdfjs/wrapper": "^0.34",
-    "n3": "^2"
+    "dpop": "^2",
+    "n3": "^2",
+    "oauth4webapi": "^3"
   },
   "devDependencies": {
     "@rdfjs/types": "^2",
     "@types/n3": "^1",
+    "fake-indexeddb": "^6.2.5",
     "typedoc": "^0.28.18",
     "typedoc-plugin-mdn-links": "^5.1.1",
     "typescript": "^6"

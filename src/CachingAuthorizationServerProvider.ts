@@ -1,22 +1,25 @@
+import type { KeyValueStore } from "@key-value-kit/core"
+import { createMemoryStore } from "@key-value-kit/storage/memory"
 import type { AuthorizationServerProvider } from "./AuthorizationServerProvider.js"
 import type * as oauth from "oauth4webapi"
 
 export class CachingAuthorizationServerProvider implements AuthorizationServerProvider {
-    readonly #cache = new Map<string, oauth.AuthorizationServer> // TODO: Take cache from caller
+    readonly #cache: KeyValueStore<oauth.AuthorizationServer>
     readonly #original: AuthorizationServerProvider
 
-    constructor(original: AuthorizationServerProvider) {
+    constructor(original: AuthorizationServerProvider, cache: KeyValueStore<oauth.AuthorizationServer> = createMemoryStore()) {
+        this.#cache = cache
         this.#original = original
     }
 
     async getAuthorizationServer(request: Request): Promise<oauth.AuthorizationServer> {
-        const cached = this.#cache.get(request.url)
-        if (cached !== undefined) {
+        const cached = await this.#cache.getItem(request.url)
+        if (cached !== null) {
             return cached
         }
 
         const fresh = await this.#original.getAuthorizationServer(request)
-        this.#cache.set(request.url, fresh)
+        await this.#cache.setItem(request.url, fresh)
         return fresh
     }
 }
